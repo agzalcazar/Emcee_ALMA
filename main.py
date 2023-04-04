@@ -14,7 +14,7 @@ from multiprocessing import Pool
 
 path = r'G:\Mi unidad\Universidad\Master_Astro\TFM\ALMA_images\Original\\'
 sources = os.listdir(path)[0:-1]
-profile = 'A'
+profile = 'D'
 
 names = ['AL-65.1', 'AL-57.1', 'AL115.1', 'AL74.1', 'AL71.1', 'AL70.1', 'AL49.1', 'AL19.1', 'AL11.1', 'AL-122.1',
          'AL-116.2', 'AL-84.1', 'AL-80.1', 'AL-75.1', 'AL-66.1', 'LESS76', 'LESS73', 'LESS67', 'LESS45', 'LESS39',
@@ -57,7 +57,7 @@ for i in range(0, len(sources)):
     else:
         image_data = fits_file[0].data[0][0]
 
-    flux = myUtils.zoom(image_data, 34)
+    flux = myUtils.zoom(image_data, 35)
     x_center = flux.shape[0] / 2
     y_center = flux.shape[1] / 2
     ra_center = fits_file[0].header['CRVAL1']
@@ -84,7 +84,9 @@ for i in range(0, len(sources)):
     bmaj_s = np.abs(bmaj * 3600) / (2 * np.sqrt(2 * np.log(2)))
 
     ### Fitting with curve fit ###
-    popt, pcov = myUtils.get_parameter_curve_fit(flux, x_grid, y_grid, profile=profile, beam=[bmin_s, bmaj_s])
+    max_flux = np.max(flux)
+    popt, pcov = myUtils.get_parameter_curve_fit(flux, x_grid, y_grid, max_flux=np.max(flux), profile=profile,                                                beam=[bmin_s, bmaj_s],
+                                                 dy=dy, bpa=bpa)
 
     if profile == 'A':
         amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic = popt  # sersic
@@ -104,13 +106,18 @@ for i in range(0, len(sources)):
         labels = ['amplitude', 'x_0', 'y_0', 'sigma_x', 'sigma_y', 'theta', 'amplitude_sersic', 'r_eff', 'ellip',
                   'angle_sersic']
 
+    elif profile == 'D':
+        x_0, y_0, amplitude, amplitude_sersic, r_eff, ellip, angle_sersic, _, _, _, _ = popt
+        pos = [x_0, y_0, amplitude, amplitude_sersic, r_eff, ellip, angle_sersic]
+        labels = ['x_0', 'y_0', 'amplitude', 'amplitude_sersic', 'r_eff', 'ellip', 'angle_sersic']
+
     ### Fitting with emcee ###
     ndim, nwalkers = len(pos), 500
     pos = [np.abs(np.random.normal(pos, 0.01)) for l in range(nwalkers)]  # initialing araund a normal
 
     sampler = emcee.EnsembleSampler(nwalkers, ndim, myUtils.log_probability,
                                     args=[x_grid.ravel(), y_grid.ravel(), flux.ravel(), myUtils.std_image(flux), [],
-                                          bmin_s, bmaj_s, profile],
+                                          bmin_s,bmaj_s,bpa,max_flux,dx,profile],
                                     )
     print("Running emcee...")
     sampler.run_mcmc(pos, 3000, progress=True)

@@ -6,14 +6,18 @@ from scipy.optimize import minimize
 from astropy.modeling.functional_models import Sersic2D
 import arviz
 from astropy.convolution import convolve, Gaussian2DKernel
+from models import Delta2D
+# from gammapy.image.models import Delta2D
 import scipy.integrate as integrate
 
 
 def zoom(image, dim):
+
     """
-    select a square of NXN around the brightest pixel
+    This function select a square of NXN around the brightest pixel.
     image: np.array of KxK dimensions
     dim: integer with dimensions of the square
+
     """
     max_rows, max_cols = np.where(image == np.nanmax(image))
     if dim % 2 == 0:
@@ -31,6 +35,10 @@ def std_image(image):
 
 
 def s_n(flux):
+    """
+    :param flux:
+    :return: signal to noise ratio
+    """
     max_signal = np.nanmax(flux)
     std = std_image(flux)
     return max_signal / std
@@ -65,10 +73,11 @@ def twoD_Gaussian_curvefit(grid, xo, yo, sigma_y, sigmax_minus_y, amplitude, the
 
 
 def sersic_curvefit(grid, amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic):
-    x, y = grid
+
+    x, y, = grid
     x_0 = float(x_0)
     y_0 = float(y_0)
-    theta_rad = np.radians(180-angle_sersic) # Angle inverted, this is why i do 180-angle to follow the same criteria as gaussian.
+    theta_rad = np.radians(180-angle_sersic) # Angle inverted, this is why I do 180-angle to follow the same criteria as gaussian.
     n = 1
     model = Sersic2D(amplitude_sersic, r_eff, n, x_0, y_0, ellip, theta_rad)
 
@@ -82,9 +91,21 @@ def Gaussian_sersic(grid, x_0, y_0, sigma_y, sigmax_minus_y, amplitude, theta, a
     model_sersic = sersic_curvefit(grid, amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic)
     model_gaussian = twoD_Gaussian_curvefit(grid, x_0, y_0, sigma_y, sigmax_minus_y, amplitude, theta)
     return model_sersic + model_gaussian
+def Delta_curfit(grid, x_0, y_0, amplitude,amplitude_sersic, r_eff, ellip, angle_sersic, bmaj, bmin, bpa, dy):
+    x_0 = float(x_0)
+    y_0 = float(y_0)
+    x, y = grid
+    delta = Delta2D(amplitude, x_0, y_0)
+    delta = delta(x, y)
+    model_sersic = sersic_curvefit(grid, amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic)
+    beam_gauss_kernel = Gaussian2DKernel(bmaj / (dy * 3600), bmin / (dy * 3600), theta=np.radians(bpa - 90), x_size=35)
+
+    astropy_conv = convolve(delta, beam_gauss_kernel)
+
+    return model_sersic + astropy_conv.ravel()
 
 
-def get_parameter_curve_fit(flux, x, y, max_flux, profile,beam):
+def get_parameter_curve_fit(flux, x, y, max_flux, profile,beam, bpa, dy):
     """
     :param flux: flux of image np.array NXN
     :param x: x component of the meshgrid
@@ -92,19 +113,7 @@ def get_parameter_curve_fit(flux, x, y, max_flux, profile,beam):
     :return:parameters. It can be used as input for the MCMC code
     """
     bmin_s, bmaj_s = beam
-    # # np.where(flux == np.max(flux))
-    # cuadrante_1 = flux[16:34, 16:34]
-    # cuadrante_2 = flux[0:16, 0:16]
-    #
-    # if sum(cuadrante_2.ravel() >= 0.4) > sum(cuadrante_1.ravel() >= 0.4):
-    #     row, col = np.where(cuadrante_2 == np.max(cuadrante_2))
-    #     r = np.sqrt(row ** 2 + col ** 2)
-    #     angle = 180 - np.arcsin(col / r) * 180 / np.pi
-    #
-    # else:
-    #     row, col = np.where(cuadrante_1 == np.max(cuadrante_1))
-    #     r = np.sqrt(row ** 2 + col ** 2)
-    #     angle = np.arcsin(col / r) * 180 / np.pi
+
     I = flux
     M0 = I.sum()
     x0 = (x * I).sum() / M0
@@ -141,6 +150,14 @@ def get_parameter_curve_fit(flux, x, y, max_flux, profile,beam):
                                    bounds=((-0.2, -0.2, 0, 0, 0.00001, 0.,0.00001,0,0,0),
                                            #(0.2, 0.2,bmin_s, bmaj_s-bmin_s, 1000, 180, 1000, 1, 1, 180)))
                                            (0.2, 0.2, 1, 1, max_flux, 180, 1000, 1, 1, 180)))
+    elif profile == 'D':
+
+        # x_0, y_0, amplitude,amplitude_sersic, r_eff, ellip, angle_sersic, bmaj, bmin, bpa, dy
+        initial_guess = (0, 0, max_flux * 0.6, max_flux * 0.6, 0.3,0.5, theta, bmaj_s, bmin_s, bpa, dy)
+        epsilon=0.00000001
+        popt, pcov = opt.curve_fit(Delta_curfit, (x, y), flux.ravel(), p0=initial_guess,
+                                   bounds=((-0.2, -0.2, 0.00001, 0.00001, 0, 0, 0,bmaj_s-epsilon, bmin_s-epsilon, bpa-epsilon, dy-epsilon),
+                                           (0.2, 0.2, max_flux,max_flux, 1, 1, 180,bmaj_s+epsilon, bmin_s+epsilon, bpa+epsilon, dy+epsilon)))
 
     return popt, pcov
 
@@ -209,12 +226,25 @@ def log_likelihood(theta, x, y, z, zerr,bmin, bmaj,bpa,dy, profile):
         theta1 = [amplitude, x_0, y_0, sigma_x, sigma_y, angle]
         theta2 = [amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic]
 
-        gauss_point = model_twoD_Gaussian(theta1, x, y).reshape(35,35)
-        # beam_gauss_kernel = Gaussian2DKernel(bmaj /(dy*3600),bmin /(dy*3600),theta=np.radians(bpa-90),x_size=35)
-        # astropy_conv = convolve(gauss_point, beam_gauss_kernel)
+        gauss_point = model_twoD_Gaussian(theta1, x, y).reshape(35, 35)
+        beam_gauss_kernel = Gaussian2DKernel(bmaj /(dy*3600),bmin /(dy*3600),theta=np.radians(bpa-90),x_size=35)
+        astropy_conv = convolve(gauss_point, beam_gauss_kernel)
 
-        # model = astropy_conv.ravel() + model_Sersic(theta2, x, y)
-        model = gauss_point.ravel() + model_Sersic(theta2, x, y)
+        model = astropy_conv.ravel() + model_Sersic(theta2, x, y)
+        #model = gauss_point.ravel() + model_Sersic(theta2, x, y)
+
+    elif profile == 'D':
+
+        x_0, y_0, amplitude, amplitude_sersic, r_eff, ellip, angle_sersic = theta
+        theta2 = [amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic]
+
+        delta = Delta2D(amplitude, x_0, y_0)
+        delta_ = delta(x, y).reshape(35, 35)
+        model_sersic = model_Sersic(theta2, x, y)
+        beam_gauss_kernel = Gaussian2DKernel(bmaj / (dy * 3600), bmin / (dy * 3600), theta=np.radians(bpa - 90), x_size=35)
+        astropy_conv = convolve(delta_.reshape(35,35), beam_gauss_kernel)
+        model = astropy_conv.ravel() + model_sersic
+
 
     return -np.power((z - model), 2) / (2 * zerr ** 2) - 0.5 * np.log(2 * np.pi * zerr ** 2)
 
@@ -232,14 +262,7 @@ def lnprior(theta, curve_fit_mu_sigma, bmin, bmaj, max_flux, profile, ):
         amplitude_sersic, r_eff, x_0, y_0, ellip, angle_sersic = theta
         if not np.all(amplitude_sersic > 0 and r_eff > 0 and 0 <= ellip <= 1 and 0 <= angle_sersic <= 180 and  -0.2<x_0<0.2 and -0.2<y_0<0.2):
             return -np.inf
-        # mu1 = 17  # curve_fit_mu_sigma[0]
-        # # sigma1 = curve_fit_mu_sigma[1] * 10
-        # sigma1 = 2
-        # mu2 = 17  # curve_fit_mu_sigma[2]
-        # sigma2 = 2  # curve_fit_mu_sigma[3] * 10
-        # prior_x0 = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma1)) - 0.5 * (x_0 - mu1) ** 2 / sigma1 ** 2
-        # prior_y0 = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma2)) - 0.5 * (y_0 - mu2) ** 2 / sigma2 ** 2
-        # return prior_x0 + prior_y0
+
         return 0
 
     elif profile == 'B':
@@ -247,39 +270,26 @@ def lnprior(theta, curve_fit_mu_sigma, bmin, bmaj, max_flux, profile, ):
         amplitude, x_0, y_0, sigma_x, sigma_y, angle = theta
         if not np.all( 0 < amplitude < max_flux and sigma_x > 0 and 0 < sigma_y <= sigma_x and 0 <= angle <= 180 and -0.2<x_0<0.2 and -0.2<y_0<0.2):
             return -np.inf
-        # mu1 = 17  # curve_fit_mu_sigma[0]
-        # # sigma1 = curve_fit_mu_sigma[1] * 10
-        # sigma1 = 2
-        # mu2 = 17  # curve_fit_mu_sigma[2]
-        # sigma2 = 2  # curve_fit_mu_sigma[3] * 10
-        # prior_x0 = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma1)) - 0.5 * (x_0 - mu1) ** 2 / sigma1 ** 2
-        # prior_yo = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma2)) - 0.5 * (y_0 - mu2) ** 2 / sigma2 ** 2
-        # return prior_x0 + prior_yo
+
         return 0
 
     elif profile == 'C':
         amplitude, x_0, y_0, sigma_x, sigma_y, angle, amplitude_sersic, r_eff, ellip, angle_sersic = theta
         if not np.all(
-                0 < amplitude < max_flux and -0.2 < x_0 < 0.2 and -0.2 < y_0 < 0.2 and 0 < sigma_x <= 2*bmaj and sigma_y <= sigma_x and 0 < sigma_y <= 2*bmin and 0 < angle <= 180 and
+                0 < amplitude < max_flux and -0.2 < x_0 < 0.2 and -0.2 < y_0 < 0.2 and 0 < sigma_x <= 1.2*bmaj and sigma_y <= sigma_x and 0 < sigma_y <= 1.2*bmin and 0 < angle <= 180 and
                 amplitude_sersic > 0 and r_eff > sigma_x * 2.35 * 0.5 and 0 <= ellip <= 1 and 0 < angle_sersic <= 180):
                 #0 < amplitude < max_flux and -0.2 < x_0 < 0.2 and -0.2 < y_0 < 0.2 and sigma_x>0 and 0 < sigma_y <= sigma_x  and 0 < angle <= 180 and
                 # amplitude_sersic > 0 and r_eff > sigma_x * 2.35 * 0.5 and 0 <= ellip <= 1 and 0 < angle_sersic <= 180):
             return -np.inf
-        # mu1 = 17.5  # curve_fit_mu_sigma[0]
-        # #sigma1 = curve_fit_mu_sigma[1]
-        # sigma1 = 2
-        # mu2 = 17.5  # curve_fit_mu_sigma[2]
-        # sigma2 = 2 #curve_fit_mu_sigma[3] * 1
-        # prior_x0 = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma1)) - 0.5 * (x_0 - mu1) ** 2 / sigma1 ** 2
-        # prior_y0 = np.log(1.0 / (np.sqrt(2 * np.pi) * sigma2)) - 0.5 * (y_0 - mu2) ** 2 / sigma2 ** 2
-        # prior_amplitude = cauchy.logpdf(amplitude,loc=curve_fit_mu_sigma[4], scale=0.1)
-        # prior_amplitude_sersic = cauchy.logpdf(amplitude_sersic,loc=curve_fit_mu_sigma[5], scale=0.1)
-        # prior_sigma_x = cauchy.logpdf(sigma_x, loc=curve_fit_mu_sigma[6], scale=0.1)
-        # prior_sigma_y = cauchy.logpdf(sigma_x, loc=curve_fit_mu_sigma[7], scale=0.1)
+        return 0
 
+    elif profile == 'D':
+        x_0, y_0, amplitude, amplitude_sersic, r_eff, ellip, angle_sersic = theta
+        if not np.all(
+                amplitude >0 and -0.2 < x_0 < 0.2 and -0.2 < y_0 < 0.2 and
+                amplitude_sersic > 0 and r_eff and 0 <= ellip <= 1 and 0 < angle_sersic <= 180):
 
-
-        #return prior_x0 + prior_y0 + prior_amplitude_sersic + prior_amplitude+prior_sigma_x+prior_sigma_y
+            return -np.inf
         return 0
 
 
@@ -353,7 +363,7 @@ def hpd_grid(sample, alpha=0.05, roundto=2):
     return hpd, x, y
 
 
-def bic(parameters, x, y, flux, profile):
+def bic(parameters, x, y, flux, bmin, bmaj,bpa,dy,profile):
     """
     Returns the BIC score of a model.
     Input:-
@@ -368,7 +378,7 @@ def bic(parameters, x, y, flux, profile):
     # initial = np.array(initial)
     # soln = minimize(nll, initial, args=(x.ravel(), y.ravel(), flux.ravel(), std_image(flux)))
     # MLE_ll = sum(log_likelihood(soln.x, x.ravel(), y.ravel(), flux.ravel(), std_image(flux)))
-    MLE_ll = sum(log_likelihood(parameters, x.ravel(), y.ravel(), flux.ravel(), std_image(flux), profile))
+    MLE_ll = sum(log_likelihood(parameters, x.ravel(), y.ravel(), flux.ravel(), std_image(flux),bmin, bmaj,bpa,dy, profile))
     p = len(parameters)
     BIC = p * np.log(x.shape[0] * x.shape[1]) - 2 * MLE_ll
     return BIC
@@ -415,6 +425,20 @@ def Tflux(theta, dx, profile, rms, points=100):
         flux = model_twoD_Gaussian(theta1, x_grid, y_grid) + model_Sersic(theta2, x_grid, y_grid)
         integral = np.sum(flux * diff ** 2 / (dx * 3600) ** 2)
 
+    elif profile == 'D':
+
+        x_0, y_0, amplitude,amplitude_sersic, r_eff, ellip, angle_sersic = theta
+        mod_1 = Sersic2D(amplitude=amplitude_sersic_emcee, r_eff=r_eff_emcee, n=1, x_0=x_0_emcee, y_0=y_0_emcee,
+                       ellip=ellip_emcee, theta=np.radians(180 - angle_sersic))
+        mod_1 = mod_1(x_grid2, y_grid2)
+
+        mod_2 = Delta2D(amplitude=amplitude, x_0=x_0_emcee, y_0=y_0_emcee)
+        mod_2 = mod_2(x_grid2, y_grid2)
+        beam_gauss_kernel = Gaussian2DKernel(bmaj_s / (dy * 3600), bmin_s / (dy * 3600), theta=np.radians(bpa - 90), x_size=51)
+        astropy_conv = convolve(mod_2, beam_gauss_kernel)
+        flux = astropy_conv + mod_1
+        integral = np.sum(flux * diff ** 2 / (dx * 3600) ** 2)
+
     integral_noise = []
     for i in range(0, points):
         noise = np.random.normal(loc=0.0, scale=rms, size=flux.shape)
@@ -423,3 +447,7 @@ def Tflux(theta, dx, profile, rms, points=100):
         integral_noise.append(np.sum(flux_noise * diff**2 / (dx*3600)**2))
 
     return integral, np.std(integral_noise)
+
+
+
+
